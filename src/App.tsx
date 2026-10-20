@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -9,6 +11,10 @@ import {
 } from "react";
 import { Chess, type Color, type PieceSymbol, type Square } from "chess.js";
 import {
+  AudioLines,
+  Box,
+  Grid2X2,
+  Music2,
   ArrowDownToLine,
   ArrowRight,
   ArrowUpRight,
@@ -56,6 +62,13 @@ import {
   type RecordGame,
   type Result,
 } from "./game/storage";
+
+import {
+  ChessAudio,
+  DEFAULT_AUDIO,
+  type AudioSettings,
+} from "./audio/ChessAudio";
+const ChessBoard3D = lazy(() => import("./scene/ChessBoard3D"));
 
 type Theme = { name: string; light: string; dark: string; accent: string };
 const THEMES: Theme[] = [
@@ -218,7 +231,15 @@ export default function App() {
   const [review, setReview] = useState<number | null>(null);
   const [tab, setTab] = useState<"moves" | "info">("moves");
   const [modal, setModal] = useState<
-    "new" | "design" | "stats" | "help" | "resign" | "draw" | "import" | null
+    | "new"
+    | "design"
+    | "stats"
+    | "help"
+    | "resign"
+    | "draw"
+    | "import"
+    | "audio"
+    | null
   >(null);
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
@@ -236,7 +257,35 @@ export default function App() {
     readStorage("atelier-legal", true),
   );
   const [sound, setSound] = useState(() => readStorage("atelier-sound", true));
-  const audio = useRef<AudioContext | null>(null);
+  const [view3d, setView3d] = useState(() => readStorage("atelier-3d", true));
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() =>
+    readStorage("atelier-audio", DEFAULT_AUDIO),
+  );
+  const audio = useRef<ChessAudio | null>(null);
+  useEffect(() => {
+    const engine = new ChessAudio();
+    audio.current = engine;
+    engine.configure(audioSettings, sound);
+    const unlock = () => {
+      void engine.unlock();
+    };
+    const visibility = () => engine.visibility();
+    window.addEventListener("pointerdown", unlock, true);
+    window.addEventListener("keydown", unlock, true);
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      window.removeEventListener("pointerdown", unlock, true);
+      window.removeEventListener("keydown", unlock, true);
+      document.removeEventListener("visibilitychange", visibility);
+      engine.dispose();
+      if (audio.current === engine) audio.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    audio.current?.configure(audioSettings, sound);
+    writeStorage("atelier-audio", audioSettings);
+    writeStorage("atelier-3d", view3d);
+  }, [audioSettings, sound, view3d]);
   const hintWorker = useRef<Worker | null>(null);
   const moveListRef = useRef<HTMLDivElement>(null);
   const fen = chess.fen();
@@ -274,29 +323,6 @@ export default function App() {
     const timer = setTimeout(() => setToast(""), 4200);
     return () => clearTimeout(timer);
   }, [toast]);
-  function playSound(capture = false) {
-    if (!sound) return;
-    try {
-      const ctx = (audio.current ??= new AudioContext());
-      void ctx.resume();
-      const oscillator = ctx.createOscillator(),
-        gain = ctx.createGain();
-      oscillator.connect(gain);
-      gain.connect(ctx.destination);
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(capture ? 330 : 520, ctx.currentTime);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        capture ? 110 : 240,
-        ctx.currentTime + 0.08,
-      );
-      gain.gain.setValueAtTime(0.055, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
-      oscillator.start();
-      oscillator.stop(ctx.currentTime + 0.11);
-    } catch {
-      /* Audio is optional. */
-    }
-  }
   function updateClocks(next: { w: number; b: number }) {
     clocksRef.current = next;
     clockAnchor.current = performance.now();
@@ -411,7 +437,17 @@ export default function App() {
       setReview(null);
       setResult(automaticResult(chess));
       setRevision((v) => v + 1);
-      playSound(Boolean(move.captured));
+      audio.current?.move(
+        move.piece,
+        Boolean(move.captured),
+        flipped ? 7 - (move.to.charCodeAt(0) - 97) : move.to.charCodeAt(0) - 97,
+        view3d,
+        pieceSet === "noir"
+          ? "metal"
+          : pieceSet === "modern"
+            ? "stone"
+            : "wood",
+      );
     } catch {
       notify("Dieser Zug ist nicht möglich. Wähle ein markiertes Feld.");
     }
@@ -789,6 +825,14 @@ export default function App() {
             >
               {sound ? <Volume2 size={18} /> : <VolumeX size={18} />}
             </button>
+            <button
+              className="icon-button"
+              aria-label="Klang und Musik einstellen"
+              title="Klang und Musik"
+              onClick={() => setModal("audio")}
+            >
+              <AudioLines size={18} />
+            </button>
             <div className="user-monogram">DU</div>
           </div>
         </header>
@@ -813,7 +857,7 @@ export default function App() {
               <Plus size={18} /> Neue Partie
             </button>
           </div>
-          <div className="game-layout">
+          <div className={`game-layout ${view3d ? "immersive-layout" : ""}`}>
             <section className="board-section" aria-label="Schachtisch">
               <div className="table-heading">
                 <span>
@@ -822,7 +866,23 @@ export default function App() {
                     ? "Gegen den Computer"
                     : "Zu zweit am Brett"}
                 </span>
-                <span>
+                <div className="view-switch" aria-label="Brettansicht">
+                  <button
+                    className={view3d ? "active" : ""}
+                    aria-pressed={view3d}
+                    onClick={() => setView3d(true)}
+                  >
+                    <Box size={13} /> 3D
+                  </button>
+                  <button
+                    className={!view3d ? "active" : ""}
+                    aria-pressed={!view3d}
+                    onClick={() => setView3d(false)}
+                  >
+                    <Grid2X2 size={13} /> 2D
+                  </button>
+                </div>
+                <span className="time-summary">
                   {config.minutes
                     ? `${config.minutes} + ${config.increment}`
                     : "Ohne Zeitdruck"}{" "}
@@ -830,110 +890,159 @@ export default function App() {
                 </span>
               </div>
               {playerBar(topColor)}
-              <div className="board-and-evaluation">
-                <div
-                  className="eval-track"
-                  aria-label={`Materialbewertung: ${evaluation.toFixed(1)} für Weiß`}
-                  title="Orientierung anhand von Material und Figurenstellung"
-                >
-                  <div style={{ height: `${50 + evaluation * 3.5}%` }} />
-                  <span>{Math.abs(evaluation).toFixed(1)}</span>
-                </div>
-                <div className="board-frame">
-                  <div className="ranks">
-                    {Array.from({ length: 8 }, (_, i) => (
-                      <span key={i}>{flipped ? i + 1 : 8 - i}</span>
-                    ))}
-                  </div>
-                  <div
-                    className="chessboard"
-                    role="group"
-                    aria-label="Schachbrett"
+              {view3d ? (
+                <div className="three-board-wrap">
+                  <Suspense
+                    fallback={
+                      <div className="scene-loading">
+                        <Box size={26} />
+                        <span>Dein Schachtisch wird aufgebaut …</span>
+                      </div>
+                    }
                   >
-                    <div className="board-grid">
-                      {Array.from({ length: 64 }, (_, i) => {
-                        const col = flipped ? 7 - (i % 8) : i % 8,
-                          row = flipped
-                            ? Math.floor(i / 8)
-                            : 7 - Math.floor(i / 8);
-                        const square = `${FILES[col]}${row + 1}` as Square,
-                          piece = viewing.get(square);
-                        const isLegal = legal.some((m) => m.to === square);
-                        const isCheck =
-                          piece?.type === "k" &&
-                          piece.color === viewing.turn() &&
-                          viewing.isCheck();
-                        return (
-                          <button
-                            key={square}
-                            data-square={square}
-                            className={`square ${(col + row) % 2 === 0 ? "dark" : "light"} ${lastMove && (lastMove.from === square || lastMove.to === square) ? "last-move" : ""} ${selected === square && review === null ? "selected-square" : ""} ${hint && (hint.from === square || hint.to === square) ? "hint-square" : ""} ${isCheck ? "check-square" : ""}`}
-                            aria-label={`${square}${piece ? `, ${labelColor(piece.color)} ${PIECE_NAMES[piece.type]}` : ", leer"}${isLegal ? ", möglicher Zug" : ""}`}
-                            aria-pressed={selected === square}
-                            onClick={() => chooseSquare(square)}
-                            onDragOver={(e) => e.preventDefault()}
-                            onDrop={(e) => {
-                              e.preventDefault();
-                              const from = e.dataTransfer.getData("text/plain");
-                              if (/^[a-h][1-8]$/.test(from))
-                                dropMove(from as Square, square);
-                            }}
-                          >
-                            <span
-                              className="square-inner"
-                              draggable={Boolean(
-                                piece &&
-                                canPlay &&
-                                piece.color === chess.turn(),
-                              )}
-                              onDragStart={(e) => {
-                                if (
-                                  !piece ||
-                                  !canPlay ||
-                                  piece.color !== chess.turn()
-                                ) {
-                                  e.preventDefault();
-                                  return;
-                                }
-                                setSelected(square);
-                                e.dataTransfer.setData("text/plain", square);
-                                e.dataTransfer.effectAllowed = "move";
+                    <ChessBoard3D
+                      key={gameId}
+                      fen={viewing.fen()}
+                      selected={review === null ? selected : null}
+                      legal={legal.map((m) => m.to)}
+                      showLegal={showLegal}
+                      lastMove={lastMove}
+                      hint={hint}
+                      flipped={flipped}
+                      set={pieceSet}
+                      light={theme.light}
+                      dark={theme.dark}
+                      canPlay={canPlay}
+                      onSquare={chooseSquare}
+                      onDrop={dropMove}
+                      onInteract={() => {
+                        void audio.current?.unlock();
+                      }}
+                      onFallback={() => {
+                        setView3d(false);
+                        notify(
+                          "Die 2D-Ansicht ist bereit. Dein Spiel geht weiter.",
+                        );
+                      }}
+                    />
+                  </Suspense>
+                  {paused && !result && (
+                    <div className="board-pause studio-pause">
+                      <button onClick={togglePause}>
+                        <Play size={27} />
+                        <strong>Dein Brett wartet.</strong>
+                        <span>Partie fortsetzen</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="board-and-evaluation">
+                  <div
+                    className="eval-track"
+                    aria-label={`Materialbewertung: ${evaluation.toFixed(1)} für Weiß`}
+                    title="Orientierung anhand von Material und Figurenstellung"
+                  >
+                    <div style={{ height: `${50 + evaluation * 3.5}%` }} />
+                    <span>{Math.abs(evaluation).toFixed(1)}</span>
+                  </div>
+                  <div className="board-frame">
+                    <div className="ranks">
+                      {Array.from({ length: 8 }, (_, i) => (
+                        <span key={i}>{flipped ? i + 1 : 8 - i}</span>
+                      ))}
+                    </div>
+                    <div
+                      className="chessboard"
+                      role="group"
+                      aria-label="Schachbrett"
+                    >
+                      <div className="board-grid">
+                        {Array.from({ length: 64 }, (_, i) => {
+                          const col = flipped ? 7 - (i % 8) : i % 8,
+                            row = flipped
+                              ? Math.floor(i / 8)
+                              : 7 - Math.floor(i / 8);
+                          const square = `${FILES[col]}${row + 1}` as Square,
+                            piece = viewing.get(square);
+                          const isLegal = legal.some((m) => m.to === square);
+                          const isCheck =
+                            piece?.type === "k" &&
+                            piece.color === viewing.turn() &&
+                            viewing.isCheck();
+                          return (
+                            <button
+                              key={square}
+                              data-square={square}
+                              className={`square ${(col + row) % 2 === 0 ? "dark" : "light"} ${lastMove && (lastMove.from === square || lastMove.to === square) ? "last-move" : ""} ${selected === square && review === null ? "selected-square" : ""} ${hint && (hint.from === square || hint.to === square) ? "hint-square" : ""} ${isCheck ? "check-square" : ""}`}
+                              aria-label={`${square}${piece ? `, ${labelColor(piece.color)} ${PIECE_NAMES[piece.type]}` : ", leer"}${isLegal ? ", möglicher Zug" : ""}`}
+                              aria-pressed={selected === square}
+                              onClick={() => chooseSquare(square)}
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                const from =
+                                  e.dataTransfer.getData("text/plain");
+                                if (/^[a-h][1-8]$/.test(from))
+                                  dropMove(from as Square, square);
                               }}
                             >
-                              {piece && (
-                                <Piece
-                                  type={piece.type}
-                                  color={piece.color}
-                                  set={pieceSet}
+                              <span
+                                className="square-inner"
+                                draggable={Boolean(
+                                  piece &&
+                                  canPlay &&
+                                  piece.color === chess.turn(),
+                                )}
+                                onDragStart={(e) => {
+                                  if (
+                                    !piece ||
+                                    !canPlay ||
+                                    piece.color !== chess.turn()
+                                  ) {
+                                    e.preventDefault();
+                                    return;
+                                  }
+                                  setSelected(square);
+                                  e.dataTransfer.setData("text/plain", square);
+                                  e.dataTransfer.effectAllowed = "move";
+                                }}
+                              >
+                                {piece && (
+                                  <Piece
+                                    type={piece.type}
+                                    color={piece.color}
+                                    set={pieceSet}
+                                  />
+                                )}
+                              </span>
+                              {isLegal && showLegal && (
+                                <span
+                                  className={`legal-marker ${piece ? "capture-marker" : ""}`}
                                 />
                               )}
-                            </span>
-                            {isLegal && showLegal && (
-                              <span
-                                className={`legal-marker ${piece ? "capture-marker" : ""}`}
-                              />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {paused && !result && (
-                      <div className="board-pause">
-                        <button onClick={togglePause}>
-                          <Play size={27} />
-                          <strong>Dein Brett wartet.</strong>
-                          <span>Partie fortsetzen</span>
-                        </button>
+                            </button>
+                          );
+                        })}
                       </div>
-                    )}
-                  </div>
-                  <div className="files">
-                    {Array.from(flipped ? "hgfedcba" : FILES).map((f) => (
-                      <span key={f}>{f}</span>
-                    ))}
+                      {paused && !result && (
+                        <div className="board-pause">
+                          <button onClick={togglePause}>
+                            <Play size={27} />
+                            <strong>Dein Brett wartet.</strong>
+                            <span>Partie fortsetzen</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="files">
+                      {Array.from(flipped ? "hgfedcba" : FILES).map((f) => (
+                        <span key={f}>{f}</span>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
               {playerBar(bottomColor)}
               <div className="board-toolbar">
                 <div className="board-status" aria-live="polite">
@@ -979,8 +1088,17 @@ export default function App() {
                 </div>
               </div>
               <div className="board-caption">
-                <span>Klicken oder ziehen – du entscheidest.</span>
-                <span>Mit Ruhe. Mit Köpfchen.</span>
+                <span>
+                  {view3d
+                    ? "Figur klicken oder ziehen · Hintergrund ziehen: Kamera · Scrollen: Zoom"
+                    : "Klicken oder ziehen – du entscheidest."}
+                </span>
+                <button
+                  className="sound-caption"
+                  onClick={() => setModal("audio")}
+                >
+                  <AudioLines size={13} /> Klang & Musik
+                </button>
               </div>
             </section>
             <aside className="game-panel">
@@ -1569,7 +1687,7 @@ export default function App() {
                 />
               </label>
               <label className="toggle-row">
-                <span>Zugtöne</span>
+                <span>Ton aktiv</span>
                 <input
                   type="checkbox"
                   checked={sound}
@@ -1594,6 +1712,91 @@ export default function App() {
             onClick={() => setModal(null)}
           >
             <Check size={17} /> Genau mein Stil
+          </button>
+        </Modal>
+      )}
+      {modal === "audio" && (
+        <Modal title="Der Klang deines Spiels." close={() => setModal(null)}>
+          <p className="modal-intro">
+            Gewicht, Holz und ein wenig Ruhe im Hintergrund.
+          </p>
+          <div className="audio-settings">
+            <label className="toggle-row">
+              <span>
+                <Volume2 size={17} /> Ton aktiv
+              </span>
+              <input
+                type="checkbox"
+                checked={sound}
+                onChange={(e) => setSound(e.target.checked)}
+              />
+            </label>
+            {(
+              [
+                ["master", "Gesamtlautstärke"],
+                ["effects", "Figuren & Spielgeräusche"],
+                ["music", "Musiklautstärke"],
+              ] as const
+            ).map(([key, label]) => (
+              <label className="audio-slider" key={key}>
+                <span>
+                  {label}
+                  <output>{Math.round(audioSettings[key] * 100)} %</output>
+                </span>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  aria-label={label}
+                  value={Math.round(audioSettings[key] * 100)}
+                  onChange={(e) =>
+                    setAudioSettings((a) => ({
+                      ...a,
+                      [key]: Number(e.target.value) / 100,
+                    }))
+                  }
+                />
+              </label>
+            ))}
+            <label className="toggle-row">
+              <span>
+                <Music2 size={17} /> Hintergrundmusik
+              </span>
+              <input
+                type="checkbox"
+                checked={audioSettings.musicOn}
+                onChange={(e) =>
+                  setAudioSettings((a) => ({ ...a, musicOn: e.target.checked }))
+                }
+              />
+            </label>
+            <p className="audio-note">
+              Eine ruhige, eigens erzeugte Klavierfolge. Ohne Downloads. Musik
+              und Effekte werden mit deinen Einstellungen gespeichert.
+            </p>
+            <button
+              className="secondary-button"
+              disabled={
+                !sound || !audioSettings.master || !audioSettings.effects
+              }
+              onClick={() =>
+                audio.current?.preview(
+                  pieceSet === "noir"
+                    ? "metal"
+                    : pieceSet === "modern"
+                      ? "stone"
+                      : "wood",
+                )
+              }
+            >
+              <Play size={15} /> Schweren Turm probehören
+            </button>
+          </div>
+          <button
+            className="primary-button modal-primary"
+            onClick={() => setModal(null)}
+          >
+            <Check size={17} /> So klingt’s gut
           </button>
         </Modal>
       )}
